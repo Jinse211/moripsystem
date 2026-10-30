@@ -160,6 +160,7 @@ footer { margin-top: 30px; text-align: center; font: 12px var(--f-jp); color: va
       <div class="fields">
         <label class="f" for="clr">Clearance (mm)<input type="number" id="clr" step="0.05" min="0" max="1" value="0.25" inputmode="decimal"></label>
         <label class="f" for="taper">Taper (mm)<input type="number" id="taper" step="0.05" min="0" max="0.6" value="0.2" inputmode="decimal"></label>
+        <label class="f" for="gthread">Grip thread (mm)<input type="number" id="gthread" step="1" min="0" max="50" value="10" inputmode="decimal"></label>
       </div>
     </details>
   </section>
@@ -220,7 +221,7 @@ const CONFIG = {
   FIXED_D: 14.0, FIXED_LEN: 50.0, THREAD_D: 14.0, THREAD_PITCH: 2.0, MIN_WALL: 1.2, N_SEG: 72,
   ADAPTER_THREAD_LEN: 50.0, MALE_CLR: 0.0, TIP_CHAMFER: 1.0, SLIT_W: 2.0, PENCIL_CLR: 0.25,
   PENCIL_TAPER: 0.2, TAPER_NARROW: "front",
-  GRIP_THREAD_CLR: 0.6, CUT_OFFSET: 0.5, GRIP_TRIM: true, GRID_THETA: 120, GRID_BLUR: 3,
+  GRIP_THREAD_CLR: 0.6, GRIP_THREAD_LEN: 10.0, GRIP_THREAD_SIDE: "front", CUT_OFFSET: 0.5, GRIP_TRIM: true, GRID_THETA: 120, GRID_BLUR: 3,
 };
 
 const PI = Math.PI, TWO_PI = 2 * Math.PI;
@@ -772,7 +773,7 @@ function _median3x3(rows, n_theta) {
   return out;
 }
 
-function build_grip_robust(verts, faces, z0, z_max, P, R_thr, min_wall, n_theta = 120, sample_dz = 0.5, blur = 3) {
+function build_grip_robust(verts, faces, z0, z_max, P, R_thr, min_wall, n_theta = 120, sample_dz = 0.5, blur = 3, thread_len = 0, thread_side = "front") {
   const nz_s = pyRound((z_max - z0) / sample_dz) + 1;
   const grid = [];
   for (let k = 0; k < nz_s; k++) grid.push(new Array(n_theta).fill(-1));
@@ -837,10 +838,15 @@ function build_grip_robust(verts, faces, z0, z_max, P, R_thr, min_wall, n_theta 
       V.push([r * Math.cos(t), r * Math.sin(t), z - z0]);
     }
   }
-  const n_out = zs.length, base_in = V.length;
+  const n_out = zs.length, base_in = V.length, L_grip = z_top - z0;
   for (const z of zs) for (let j = 0; j < n_theta; j++) {
-    const t = TWO_PI * j / n_theta, r = thread(t, z - z0);
-    V.push([r * Math.cos(t), r * Math.sin(t), z - z0]);
+    const t = TWO_PI * j / n_theta, zz = z - z0;
+    let r = thread(t, zz);
+    if (thread_len > 0 && thread_len < L_grip) {
+      if (thread_side === "rear") r = zz >= thread_len ? R_thr : Math.max(r, R_thr - (thread_len - zz));
+      else { const zs_ = L_grip - thread_len; r = zz <= zs_ ? R_thr : Math.max(r, R_thr - (zz - zs_)); }
+    }
+    V.push([r * Math.cos(t), r * Math.sin(t), zz]);
   }
   const q = (a, b, c, d) => { F.push([a, b, c]); F.push([a, c, d]); };
   for (let k = 0; k < n_out - 1; k++) for (let j = 0; j < n_theta; j++) {
@@ -926,9 +932,12 @@ function process_scan(verts, faces, C, already_mm = false, progress = () => {}) 
   progress("グリップを組み立てています");
   const R = (C.THREAD_D + C.GRIP_THREAD_CLR) / 2;
   const [gv, gf, gi] = build_grip_robust(aligned_v, faces, Lc, z_max, C.THREAD_PITCH, R, C.MIN_WALL,
-    Math.trunc(C.GRID_THETA), 0.5, Math.trunc(C.GRID_BLUR));
+    Math.trunc(C.GRID_THETA), 0.5, Math.trunc(C.GRID_BLUR), +C.GRIP_THREAD_LEN || 0, C.GRIP_THREAD_SIDE || "front");
   const L_male = C.ADAPTER_THREAD_LEN - C.CUT_OFFSET;
-  lines.push(`グリップの長さ：${fmt(gi.length, 1)} mm（めねじは全長）`);
+  const tl = +C.GRIP_THREAD_LEN || 0;
+  const side = C.GRIP_THREAD_SIDE === "rear" ? "後端（固定領域側）" : "先端（書く側）";
+  if (tl > 0 && tl < gi.length) lines.push(`グリップの長さ：${fmt(gi.length, 1)} mm（めねじは${side}から ${fmt(tl, 1)} mm、残りは直径 ${fmt(2 * R, 1)} mm の丸穴）`);
+  else lines.push(`グリップの長さ：${fmt(gi.length, 1)} mm（めねじは全長）`);
   if (gi.length < L_male - 2) warns.push(`グリップ（${fmt(gi.length, 1)} mm）がおねじ（${fmt(L_male, 1)} mm）より2mm以上短く、規格部品が先端から飛び出します。スキャンの先端が欠けていないか確認してください`);
   if (gi.filled_cells) lines.push(`スキャンの抜け（表面の ${fmt(100 * gi.filled_cells / ((gi.length / 0.5 + 1) * Math.trunc(C.GRID_THETA)), 1)}%）を周りの形から補いました`);
   if (gi.added_cells) lines.push(`最小肉厚 ${fmt(C.MIN_WALL, 1)} mm を保証：薄い所に最大 ${fmt(gi.add_max, 2)} mm 肉を足しました`);
@@ -1092,6 +1101,7 @@ function run(opts = {}, progress = () => {}) {
   const C = Object.assign({}, CONFIG);
   if (opts.clearance != null) C.PENCIL_CLR = +opts.clearance;
   if (opts.taper != null) C.PENCIL_TAPER = +opts.taper;
+  if (opts.grip_thread != null) C.GRIP_THREAD_LEN = +opts.grip_thread;
   const scan = opts.scan || null;
   const out = { lines: [], warns: [], error: null };
   try {
@@ -1364,7 +1374,7 @@ if (typeof module !== "undefined") {
   };
 
   function readOpts() {
-    const o = { pencil_id: $("pencil").value, clearance: currentClearance(), taper: num("taper") ?? 0.2 };
+    const o = { pencil_id: $("pencil").value, clearance: currentClearance(), taper: num("taper") ?? 0.2, grip_thread: num("gthread") ?? 10 };
     if (o.pencil_id === "__add") o.pencil_id = lastPick;
     if (o.pencil_id.startsWith("mine:")) {
       const p = mine.find((x) => x.id === o.pencil_id.slice(5)) || {};
